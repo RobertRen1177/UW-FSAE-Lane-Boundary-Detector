@@ -84,87 +84,63 @@ class CLCEnumerator:
         def neighbors_of(idx: int, visited: Set[int]) -> Set[int]:
             """Graph neighbors that are not yet visited on this path."""
             return {n for n in graph.get(idx, set()) if n not in visited}
-
-        # ---- DFS state -------------------------------------------------------
+    
         candidates: List[Dict] = []
+        def dfs(left_path, right_path, visL, visR, M_fixed_prev):
+            left_back = left_path[-1]
+            right_back= right_path[-1]
+            left_unvisited = neighbors_of(left_back, visL)
+            right_unvisited = neighbors_of(right_back, visR)
 
+            for _ in range(len(left_unvisited) + len(right_unvisited)):
+                left_next  = self.heuristics.next_vertex_decider(left_path,  left_unvisited,  points, graph)
+                right_next = self.heuristics.next_vertex_decider(right_path, right_unvisited, points, graph)
 
-        # ---- DFS loop --------------------------------------------------------
-        stack : Deque = [([start_left], [start_right], set([start_left]), set([start_right]), None, 0, None )]
+                if left_next is None and right_next is None:
+                    passed, keep, M_fixed_new = path_ok_and_bt(left_path, right_path, M_fixed_prev)
+                    if passed:
+                        candidates.append({"left_path": left_path,
+                                        "right_path": right_path,
+                                        "M_fixed": M_fixed_new})
+                    return
 
-        while stack:
-            left_path, right_path, visL, visR, M_fixed_prev, steps, undo_info = stack.pop()
-
-            # ---- UNDO visited when backtracking ----
-            if undo_info:
-                side, node = undo_info
-                if side == "L" and node in visL:
-                    visL.remove(node)
-                elif side == "R" and node in visR:
-                    visR.remove(node)
-
-            if steps > self.max_steps:
-                continue
-
-            left_unvisited  = neighbors_of(left_path[-1], visL)
-            right_unvisited = neighbors_of(right_path[-1], visR)
-
-            left_next  = self.heuristics.next_vertex_decider(left_path,  left_unvisited,  points, graph)
-            right_next = self.heuristics.next_vertex_decider(right_path, right_unvisited, points, graph)
-
-            if left_next is None and right_next is None:
-                passed, keep, M_fixed_new = path_ok_and_bt(left_path, right_path, M_fixed_prev)
-                if passed:
-                    candidates.append({"left_path": left_path,
-                                    "right_path": right_path,
-                                    "M_fixed": M_fixed_new})
-                continue
-
-            if left_next is None and right_next is not None:
-                side_to_extend = 1
-            elif right_next is None and left_next is not None:
-                side_to_extend = 0
-            else:
-                side_to_extend = self.heuristics.left_right_decider(
-                    left_path, right_path, left_next, right_next, points
-                )
-
-            for trial in ([side_to_extend], [1-side_to_extend]):
-                s = trial[0]
-
+                if left_next is None and right_next is not None:
+                    s = 1
+                elif right_next is None and left_next is not None:
+                    s = 0
+                else:
+                    s = self.heuristics.left_right_decider(
+                        left_path, right_path, left_next, right_next, points
+                    )
+                
                 if s == 0 and left_next is not None:
                     new_left  = left_path + [left_next]
                     new_right = right_path
                     visL.add(left_next)
-                    undo_info = ("L", left_next)
-                    new_visL, new_visR = visL, visR
+                    left_unvisited.remove(left_next)
+
                 elif s == 1 and right_next is not None:
                     new_left  = left_path
                     new_right = right_path + [right_next]
-                    visR.add(right_next)  # mark visited
-                    undo_info = ("R", right_next)
-                    new_visL, new_visR = visL, visR
+                    visR.add(right_next) 
+                    right_unvisited.remove(right_next)
                 else:
-                    continue
+                    return
+
 
                 passed, keep, M_fixed_new = path_ok_and_bt(new_left, new_right, M_fixed_prev)
-                if not passed and not keep:
-                    # undo immediately if branch is hopeless
-                    if undo_info[0] == "L":
-                        visL.remove(undo_info[1])
-                    else:
-                        visR.remove(undo_info[1])
-                    continue
-
-                stack.append((new_left, new_right, new_visL, new_visR, M_fixed_new, steps+1, undo_info))
 
                 if passed:
                     candidates.append({"left_path": new_left,
                                     "right_path": new_right,
                                     "M_fixed": M_fixed_new})
-
-
-
+                
+                dfs(new_left, new_right, visL, visR, M_fixed_new)
+                if(s == 0):
+                    visL.remove(left_next)
+                else:
+                    visR.remove(right_next)
+        dfs([start_left], [start_right], set([start_left]), set([start_right]), None)
         return candidates
 
 
@@ -245,6 +221,8 @@ def find_starting_vertices(points: List[Point2D], car_pos: Point2D,
 
     return best_pair[0], best_pair[1]
 
+import time
+start = time.time()
 points = ([[9.03206651, -3.6854952, -0.33961914], [9.66560302, -6.81808691, -0.32954925], [9.38951545, -9.39995367, -0.27203662], [5.81633507, -4.95950717, -0.27163835],
 [6.07295484, -6.78853607, -0.2706291 ], [2.68753045, -2.1297958 , -0.14568515]])
 car_pos = Point2D(6, 2)
@@ -255,7 +233,7 @@ for i in range(len(points)):
     points[i] = Point2D(points[i][0], points[i][1])
 
 # Example wiring:
-constraints = GeometricConstraints(w_min=2.5, w_max=7.0, d_max=5, phi_max=70.0)
+constraints = GeometricConstraints(w_min=2.5, w_max=7.0, d_max=5, phi_max=60.0)
 heuristics  = SearchHeuristics(car_heading=car_heading)
 
 graph = construct_search_graph(points, d_max=5.5)
@@ -263,7 +241,7 @@ start_L, start_R = 5, 0
 
 enumerator = CLCEnumerator(constraints, heuristics, max_steps=2500)
 cands = enumerator.enumerate_candidates(points, graph, start_L, start_R, M_fixed_init=None)
-
+print(time.time() - start)
 import matplotlib.pyplot as plt
 
 def show_candidates(candidates, points):
