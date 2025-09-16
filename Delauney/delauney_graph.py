@@ -85,65 +85,46 @@ def build_midpoint_graph(cones, car_position = None, car_heading = None):
             for j in range(i + 1, 3):
                 G.add_edge(triangle_midpoints[i], triangle_midpoints[j])
     
-    #Find the starting node:
-    #given the car heading and the car position: 
-    #first split cones between cones to the left of the car heading, and cones to the right of the car heading
-    #If there are items in both lists, pick the cones from each side closest to the car, and the midpoint between 
-    #those cones is the starting node
-    #If there are no items in one of the lists, pick the 2 cones closest to the car from the list with points 
-    #and the midpoint between them is the starting midpoint
-    
-    start_node = None
+
+    #connecting the car to the graph, simply using the basic solution of connecting car to the closest triangle
+    car_node = None
     if car_position is not None:
-        if car_heading is not None:
-            # Split cones based on car heading
-            heading_vector = np.array([np.cos(car_heading), np.sin(car_heading)])
-            left_cones = []
-            right_cones = []
+        #find the closest midpoint to the car
+        closest_midpoint_idx = None
+        closest_midpoint = None
+        min_distance = float('inf')
+
+        for edge, idx in midpoints.items():
+            midpoint = (cones_for_triangulation[edge[0]] + cones_for_triangulation[edge[1]]) / 2
+            distance = np.linalg.norm(car_position - midpoint)
+
+            if distance < min_distance:
+                min_distance = distance
+                closest_midpoint_idx = edge
+
+        if closest_midpoint_idx is not None:
+            #Find all triangles containing the closest edge
+            connected_midpoints = set()
+
+            for simplex in triangles:
+                edges = [
+                    tuple(sorted((simplex[0], simplex[1]))),
+                    tuple(sorted((simplex[1], simplex[2]))),
+                    tuple(sorted((simplex[0], simplex[2])))
+                ]
+
+                if closest_midpoint_idx in edges:  #if the closest edge is part of a triangle
+                    for edge in edges:
+                        if edge in midpoints:
+                            connected_midpoints.add(midpoints[edge])
             
-            for i, cone in enumerate(cones):
-                cone_vector = cone - car_position
-                cross_product = np.cross(heading_vector, cone_vector)
-                if cross_product > 0:  # Left side
-                    left_cones.append((i, cone, np.linalg.norm(cone_vector)))
-                else:  # Right side
-                    right_cones.append((i, cone, np.linalg.norm(cone_vector)))
-            
-            # Sort by distance to car
-            left_cones.sort(key=lambda x: x[2])
-            right_cones.sort(key=lambda x: x[2])
-            
-            if left_cones and right_cones:
-                # Pick closest cone from each side
-                closest_left = left_cones[0]
-                closest_right = right_cones[0]
-                
-                # Find the edge corresponding to these two cones
-                edge_key = tuple(sorted([closest_left[0], closest_right[0]]))
-                if edge_key in midpoints:
-                    start_node = midpoints[edge_key]
-            else:
-                # Use the list with cones, pick 2 closest
-                available_cones = left_cones if left_cones else right_cones
-                if len(available_cones) >= 2:
-                    cone1 = available_cones[0]
-                    cone2 = available_cones[1]
-                    
-                    edge_key = tuple(sorted([cone1[0], cone2[0]]))
-                    if edge_key in midpoints:
-                        start_node = midpoints[edge_key]
-        
-        # If start_node is still None, find the closest midpoint to car position
-        if start_node is None:
-            min_distance = float('inf')
-            for node_idx in G.nodes():
-                node_pos = np.array(G.nodes[node_idx]['pos'])
-                distance = np.linalg.norm(node_pos - car_position)
-                if distance < min_distance:
-                    min_distance = distance
-                    start_node = node_idx
+            car_node = len(G.nodes) 
+            G.add_node(car_node, pos=car_position)
+
+            for mp_idx in connected_midpoints:
+                G.add_edge(car_node, mp_idx)
     
-    return G, midpoints, start_node, midpoint_to_edge
+    return G, midpoints, car_node, midpoint_to_edge
 
 def find_all_paths_bfs(G, car_node, midpoints, cones):
     '''
@@ -214,6 +195,12 @@ def find_all_paths_bfs(G, car_node, midpoints, cones):
             
             queue.append(new_path)
             valid_paths.append(new_path)
+    
+    #deleting first node from every path (car connection node)
+    for i in range(len(valid_paths)):
+        if(len(valid_paths[i]) == 0):
+            continue
+        valid_paths[i] = valid_paths[i][1:] 
 
     return valid_paths
 
@@ -290,17 +277,11 @@ def compute_path_cost(path, node_positions, cones, midpoints_to_edge, sensor_ran
     segment_lengths = []
     path_length = 0
     
-    #first angle is basically comparing the first path segment to the cars angle which is (0 degrees)
-    if len(path) == 2:
-        pos1 = np.array(node_positions[path[0]])
-        pos2 = np.array(node_positions[path[1]])
-        vec = pos2 - pos1
-        angles.append(np.degrees(np.abs(math.atan(vec[1] / vec[0]))))
 
     #Compute angle costs only if there are at least 3 nodes
     if len(path) >= 3:
-        for i in range(len(path) - 2):
-            pos1 = np.array(node_positions[path[i]])
+        for i in range(-1, len(path) - 2):
+            pos1 = np.array([0, 0]) if i == -1 else np.array(node_positions[path[i]]) #adding deviation from starting heading
             pos2 = np.array(node_positions[path[i + 1]])
             pos3 = np.array(node_positions[path[i + 2]])
 
@@ -313,13 +294,16 @@ def compute_path_cost(path, node_positions, cones, midpoints_to_edge, sensor_ran
             angle_change = np.degrees(np.arccos(dot_product))
             angles.append(angle_change)
 
-            segment_length = np.linalg.norm(pos2 - pos1)
-            segment_lengths.append(segment_length)
-            path_length += segment_length
+            if(i != -1):
+                segment_length = np.linalg.norm(pos2 - pos1)
+                segment_lengths.append(segment_length)
+                path_length += segment_length
 
     #if there are no track widths something went terribly wrong
     track_widths = find_track_width(path, midpoints_to_edge, node_positions, cones)
-    
+    track_widths_bool = [track_width < 2.5 or track_width > 7.0 for track_width in track_widths]
+    if(any(track_widths_bool)):
+        return float('inf'), None
     #compute standard deviations
     if(len(track_widths) < 2):
         std_track_width = TRACK_WIDTH_NORM
@@ -349,7 +333,6 @@ def compute_path_cost(path, node_positions, cones, midpoints_to_edge, sensor_ran
 
 
     total_cost = angle_cost + track_width_cost + path_length_cost + segment_length_cost
-
     return total_cost, track_widths
 
 def select_best_path(valid_paths, node_positions, cones, midpoints_to_edge):
@@ -371,10 +354,97 @@ def select_best_path(valid_paths, node_positions, cones, midpoints_to_edge):
     #when the best path has been selected, calculate the track
     return best_path, best_path_track_width
 
+import numpy as np
+
+cones1 = np.array([
+    [13.09269529,  4.45135511, -0.3596712 ],
+    [17.17727473,  4.91481665, -0.49335899],
+    [11.22424827,  1.73029441, -0.3219821 ],
+    [ 9.38312001, -0.34894386, -0.2672492 ],
+    [12.22028656,  8.53685001, -0.42736825],
+    [ 8.51601783,  4.57713532, -0.3058427 ],
+    [ 6.81384983, -1.31817688, -0.25840061],
+    [14.05711148, -9.09950316, -0.50752836],
+    [ 9.77083306,  6.75457689, -0.49327014],
+    [ 4.26952468, -1.54373011, -0.20366112],
+    [ 1.9445746 , -1.36197695, -0.27167486]
+])
+
+cones2 = np.array([
+    [11.24418924,  0.09918644, -0.32758854],
+    [13.87223508, -4.16553117, -0.38951149],
+    [10.33628209, -5.77247043, -0.24183792],
+    [15.44283371, -8.74982627, -0.37658794],
+    [ 4.12687191, -1.15983222, -0.14020456],
+    [ 2.89216805,  2.55772771, -0.15923898],
+    [ 1.10214047, -2.36081286, -0.10111462]
+])
+
+cones3 = np.array([
+    [15.56918874,  8.66339061, -0.14345157],
+    [ 5.73710443,  2.39267125, -0.131736  ],
+    [10.93323896, -0.40667089, -0.31727742],
+    [13.40990377, -4.70887964, -0.36741134],
+    [ 9.81898131, -6.17526504, -0.21469049],
+    [ 3.85344146, -1.40947354, -0.12591276],
+    [ 2.71623709,  2.37858344, -0.19524106]
+])
+
+cones4 = np.array([
+    [14.16862571,  6.25760103, -0.16439619],
+    [ 8.36072658, -2.04194506, -0.22524068],
+    [10.21942458, -6.64782736, -0.22042864],
+    [ 6.48185035, -7.61451682, -0.15499285],
+    [ 1.18107043, -2.02150675, -0.10049133]
+])
+
+cones5 = np.array([
+    [ 9.93465628, -1.07922008, -0.39643656],
+    [12.80902476, -2.68188222, -0.51619025],
+    [14.57903133, -4.87974922, -0.57992206],
+    [15.11335652, -7.62324619, -0.57655988],
+    [11.04122341, -8.09664899, -0.37682902],
+    [ 6.53603306,  0.32142461, -0.33615402],
+    [ 6.91948458, -3.56708974, -0.34691376],
+    [ 4.47863847, -2.63600179, -0.33686307]
+])
+
+# cones6 is actually a duplicate of cones3
+cones6 = np.array([
+    [15.56918874,  8.66339061, -0.14345157],
+    [ 5.73710443,  2.39267125, -0.131736  ],
+    [10.93323896, -0.40667089, -0.31727742],
+    [13.40990377, -4.70887964, -0.36741134],
+    [ 9.81898131, -6.17526504, -0.21469049],
+    [ 3.85344146, -1.40947354, -0.12591276],
+    [ 2.71623709,  2.37858344, -0.19524106]
+])
+
+cones7 = np.array([
+    [ 6.63568726, -1.1364633 , -0.25140037],
+    [ 9.92854105, -8.89961183, -0.3084694 ],
+    [ 6.42730238, -7.09800871, -0.16230461],
+    [ 2.7494667 ,  1.87884724, -0.19433153]
+])
+
+cones8 = np.array([
+    [ 7.98906507, -1.69342013, -0.21579882],
+    [ 9.35134436, -5.53740481, -0.33276538],
+    [ 5.44432161, -4.81995713, -0.15402686],
+    [ 5.99747076, -8.68873783, -0.24660405]
+])
+
+cones9 = np.array([[9.03206651, -3.6854952, -0.33961914], [9.66560302, -6.81808691, -0.32954925], [9.38951545, -9.39995367, -0.27203662], [5.81633507, -4.95950717, -0.27163835],
+[6.07295484, -6.78853607, -0.2706291 ], [2.68753045, -2.1297958 , -0.14568515]])
+
+cones10 = np.array([[9.93465628, -1.07922008, -0.39643656], [12.80902476, -2.68188222, -0.51619025], [14.57903133, -4.87974922, -0.57992206],
+[15.11335652, -7.62324619, -0.57655988], [11.04122341, -8.09664899, -0.37682902], [6.53603306, 0.32142461, -0.33615402], [6.91948458, -3.56708974, -0.34691376],
+[4.47863847, -2.63600179, -0.33686307]])
+
 
 if __name__ == '__main__':
-    cones = np.array([[9.03206651, -3.6854952, -0.33961914], [9.66560302, -6.81808691, -0.32954925], [9.38951545, -9.39995367, -0.27203662], [5.81633507, -4.95950717, -0.27163835],
-[6.07295484, -6.78853607, -0.2706291 ], [2.68753045, -2.1297958 , -0.14568515]])
+    cones = cones10
+
     cones_for_triangulation = []
     for cone in cones:
         cones_for_triangulation.append([cone[0], cone[1]])
@@ -382,7 +452,7 @@ if __name__ == '__main__':
     cones_for_triangulation = np.array(cones_for_triangulation)
     
     start = time.time()
-    G, midpoints, start_node, midpoint_to_edge = build_midpoint_graph(cones_for_triangulation, np.array([0, 0]), np.deg2rad(-25))
+    G, midpoints, start_node, midpoint_to_edge = build_midpoint_graph(cones_for_triangulation, np.array([0, 0]), 0)
 
     node_pos = nx.get_node_attributes(G, 'pos')
     valid_paths = find_all_paths_bfs(G, start_node, midpoints, cones_for_triangulation)
@@ -421,68 +491,5 @@ if __name__ == '__main__':
     plt.plot(path_coords[:, 0], path_coords[:, 1], linestyle="--", alpha=0.7)
     plt.show()
     print(compute_path_cost(best_path, node_pos, cones_for_triangulation, midpoint_to_edge))
-
-    #Korry testing points
-# Cone Map [[13.09269529  4.45135511 -0.3596712 ]
-#  [17.17727473  4.91481665 -0.49335899]
-#  [11.22424827  1.73029441 -0.3219821 ]
-#  [ 9.38312001 -0.34894386 -0.2672492 ]
-#  [12.22028656  8.53685001 -0.42736825]
-#  [ 8.51601783  4.57713532 -0.3058427 ]
-#  [ 6.81384983 -1.31817688 -0.25840061]
-#  [14.05711148 -9.09950316 -0.50752836]
-#  [ 9.77083306  6.75457689 -0.49327014]
-#  [ 4.26952468 -1.54373011 -0.20366112]
-#  [ 1.9445746  -1.36197695 -0.27167486]]
-# Cone Map [[11.24418924  0.09918644 -0.32758854]
-#  [13.87223508 -4.16553117 -0.38951149]
-#  [10.33628209 -5.77247043 -0.24183792]
-#  [15.44283371 -8.74982627 -0.37658794]
-#  [ 4.12687191 -1.15983222 -0.14020456]
-#  [ 2.89216805  2.55772771 -0.15923898]
-#  [ 1.10214047 -2.36081286 -0.10111462]]
-# Cone Map [[15.56918874  8.66339061 -0.14345157]
-#  [ 5.73710443  2.39267125 -0.131736  ]
-#  [10.93323896 -0.40667089 -0.31727742]
-#  [13.40990377 -4.70887964 -0.36741134]
-#  [ 9.81898131 -6.17526504 -0.21469049]
-#  [ 3.85344146 -1.40947354 -0.12591276]
-#  [ 2.71623709  2.37858344 -0.19524106]]
-# Cone Map [[14.16862571  6.25760103 -0.16439619]
-#  [ 8.36072658 -2.04194506 -0.22524068]
-#  [10.21942458 -6.64782736 -0.22042864]
-#  [ 6.48185035 -7.61451682 -0.15499285]
-#  [ 1.18107043 -2.02150675 -0.10049133]]
-
-# Cone Map [[ 9.93465628 -1.07922008 -0.39643656]
-#  [12.80902476 -2.68188222 -0.51619025]
-#  [14.57903133 -4.87974922 -0.57992206]
-#  [15.11335652 -7.62324619 -0.57655988]
-#  [11.04122341 -8.09664899 -0.37682902]
-#  [ 6.53603306  0.32142461 -0.33615402]
-#  [ 6.91948458 -3.56708974 -0.34691376]
-#  [ 4.47863847 -2.63600179 -0.33686307]]
-# Cone Map [[15.56918874  8.66339061 -0.14345157]
-#  [ 5.73710443  2.39267125 -0.131736  ]
-#  [10.93323896 -0.40667089 -0.31727742]
-#  [13.40990377 -4.70887964 -0.36741134]
-#  [ 9.81898131 -6.17526504 -0.21469049]
-#  [ 3.85344146 -1.40947354 -0.12591276]
-#  [ 2.71623709  2.37858344 -0.19524106]]
-# Cone Map [[ 6.63568726 -1.1364633  -0.25140037]
-#  [ 9.92854105 -8.89961183 -0.3084694 ]
-#  [ 6.42730238 -7.09800871 -0.16230461]
-#  [ 2.7494667   1.87884724 -0.19433153]]
-# Cone Map [[ 7.98906507 -1.69342013 -0.21579882]
-#  [ 9.35134436 -5.53740481 -0.33276538]
-#  [ 5.44432161 -4.81995713 -0.15402686]
-#  [ 5.99747076 -8.68873783 -0.24660405]]
-
-#  cones = np.array([[9.03206651, -3.6854952, -0.33961914], [9.66560302, -6.81808691, -0.32954925], [9.38951545, -9.39995367, -0.27203662], [5.81633507, -4.95950717, -0.27163835],
-#  [6.07295484, -6.78853607, -0.2706291 ], [2.68753045, -2.1297958 , -0.14568515]])
-
-#  cones = np.array([[9.93465628, -1.07922008, -0.39643656], [12.80902476, -2.68188222, -0.51619025], [14.57903133, -4.87974922, -0.57992206],
-#  [15.11335652, -7.62324619, -0.57655988], [11.04122341, -8.09664899, -0.37682902], [6.53603306, 0.32142461, -0.33615402], [6.91948458, -3.56708974, -0.34691376],
-#  [4.47863847, -2.63600179, -0.33686307]])
 
 
