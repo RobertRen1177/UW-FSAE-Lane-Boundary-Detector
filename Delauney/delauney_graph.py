@@ -23,21 +23,20 @@ Each valid path is run through a cost function and the lowest cost one is picked
 PRUNING_ANGLE = 45
 PRUNING_PATH_SEG_LENGTH = 10
 PRUNING_EDGE_LENGTH = 10
+OBTUSE_THRESHOLD = 150  # degrees
 
 # Cost function weights
 ANGLE_CHANGE_WEIGHT = 4.0
 TRACK_WIDTH_WEIGHT = 3.0
-CONE_DIST_WEIGHT = 1.0
+CONE_DIST_WEIGHT = 1.5
 SEGMENT_LENGTH_WEIGHT = 3.0
-PATH_LENGTH_WEIGHT = 1.5
-
-
+PATH_LENGTH_WEIGHT = 2.0
 
 # NORMALIZATION
 ANGLE_NORM = 45
 TRACK_WIDTH_NORM = 3.0
 CONE_DIST_NORM = 2.0
-PATH_LENGTH_NORM = 25
+PATH_LENGTH_NORM = 50
 CONE_LENGTH_NORM = 2.0
 SEGMENT_LENGTH_NORM = 3.0
 
@@ -84,6 +83,26 @@ def calculate_track_width(path, left_path, right_path, node_positions):
         closet_right = closest_point_to_polyline(midpoint, right_path)
         track_widths.append(np.linalg.norm(closet_left - closet_right))
     return track_widths
+
+def max_triangle_angle(p1, p2, p3):
+    # vectors
+    a = np.linalg.norm(p2 - p3)
+    b = np.linalg.norm(p1 - p3)
+    c = np.linalg.norm(p1 - p2)
+    
+    # law of cosines
+    def angle(opposite, adj1, adj2):
+        return np.degrees(np.arccos(
+            np.clip((adj1**2 + adj2**2 - opposite**2) / (2 * adj1 * adj2), -1.0, 1.0)
+        ))
+    
+    angles = [
+        angle(a, b, c),
+        angle(b, a, c),
+        angle(c, a, b)
+    ]
+    return max(angles)
+
 #################################################################################
 
 
@@ -103,6 +122,12 @@ def build_midpoint_graph(cones, car_position=None, car_heading=None):
 
     # get all triangles
     triangles = triangulation.simplices
+    bad_triangles = set()
+    for simplex in triangles:
+        pts = cones[simplex]
+        if max_triangle_angle(*pts) > OBTUSE_THRESHOLD:
+            bad_triangles.add(tuple(sorted(simplex)))
+
 
     # dictionary where key is the edge and the key is the idpoint NODE (not the actual midpoint)
     midpoints = {}
@@ -160,10 +185,10 @@ def build_midpoint_graph(cones, car_position=None, car_heading=None):
             for _, mp_idx in three_closest:
                 G.add_edge(car_node, mp_idx)
 
-    return G, midpoints, car_node, midpoint_to_edge
+    return G, midpoints, car_node, midpoint_to_edge, bad_triangles
 
 
-def find_all_paths_bfs(G, car_node, midpoints, cones):
+def find_all_paths_bfs(G, car_node, midpoints, cones, bad_triangles):
     '''
     G: Graph through the midpoints of delauney triangulation
     car_node: the node of the car or the starting node
@@ -196,6 +221,16 @@ def find_all_paths_bfs(G, car_node, midpoints, cones):
             segment_length = np.linalg.norm(new_pos - last_pos)
             if segment_length > PRUNING_PATH_SEG_LENGTH and last_node is not car_node:
                 continue
+            edge_last = midpoint_to_edge.get(last_node)
+            edge_next = midpoint_to_edge.get(neighbor)
+
+            if edge_last is not None and edge_next is not None:
+                # they share a triangle if together with one more vertex they make a simplex
+                shared = set(edge_last) | set(edge_next)
+                if len(shared) == 3:  # exactly a triangle
+                    if tuple(sorted(shared)) in bad_triangles:
+                        continue  # prune this path
+
 
             valid_angle = True
             if (len(new_path) > 2 and new_path[-3] is not car_node):
@@ -241,6 +276,7 @@ def find_all_paths_bfs(G, car_node, midpoints, cones):
         valid_paths[i] = valid_paths[i][1:]
 
     return valid_paths
+
 
 def find_track_width(path, midpoints_to_edges, node_positions, cones):
     """
@@ -304,8 +340,6 @@ def find_track_width(path, midpoints_to_edges, node_positions, cones):
     return calculate_track_width(path, left_side_u, right_side_u, node_positions), combined_distances
 
 
-
-
 def compute_path_cost(path, node_positions, cones, midpoints_to_edge, sensor_range=10):
     '''
     path: the path that the function is computing its cost for
@@ -353,27 +387,27 @@ def compute_path_cost(path, node_positions, cones, midpoints_to_edge, sensor_ran
     # if there are no track widths something went terribly wrong
     track_widths, combined_distances = find_track_width(
         path, midpoints_to_edge, node_positions, cones)
-    
+
     track_widths_bool = [track_width < 2.5 or track_width >
                          7.0 for track_width in track_widths]
-    
+
     if (any(track_widths_bool)):
         return float('inf'), None
-    
+
     # compute standard deviations
     if (len(track_widths) < 2):
         std_track_width = TRACK_WIDTH_NORM
     else:
         std_track_width = np.std(track_widths)
         std_track_width = std_track_width if std_track_width < TRACK_WIDTH_NORM else TRACK_WIDTH_NORM
-    
+
     if (len(combined_distances) < 2):
         std_combined_distances = CONE_DIST_NORM
     else:
         std_combined_distances = np.std(combined_distances)
         std_combined_distances = std_combined_distances if std_combined_distances < CONE_DIST_NORM else CONE_DIST_NORM
-    
-    if(len(segment_lengths) < 2):
+
+    if (len(segment_lengths) < 2):
         std_segment_length = SEGMENT_LENGTH_NORM
     else:
         std_segment_length = np.std(segment_lengths)
@@ -390,17 +424,20 @@ def compute_path_cost(path, node_positions, cones, midpoints_to_edge, sensor_ran
     # dont need conditional because path finder does this already
     angle_cost = ANGLE_CHANGE_WEIGHT * max_angle_change / ANGLE_NORM
 
-    combined_distances_cost = CONE_DIST_WEIGHT * std_combined_distances / CONE_DIST_NORM
+    combined_distances_cost = CONE_DIST_WEIGHT * \
+        std_combined_distances / CONE_DIST_NORM
 
     track_width_cost = TRACK_WIDTH_WEIGHT * std_track_width / TRACK_WIDTH_NORM
 
-    segment_length_cost = SEGMENT_LENGTH_WEIGHT * std_segment_length / SEGMENT_LENGTH_NORM
+    segment_length_cost = SEGMENT_LENGTH_WEIGHT * \
+        std_segment_length / SEGMENT_LENGTH_NORM
 
     path_length_cost = PATH_LENGTH_WEIGHT * path_length_penalty / PATH_LENGTH_NORM
 
     total_cost = angle_cost + track_width_cost + \
         path_length_cost + combined_distances_cost + segment_length_cost
-    print(angle_cost, combined_distances_cost, track_width_cost, segment_length_cost, path_length_cost)
+    print(angle_cost, combined_distances_cost, track_width_cost,
+          segment_length_cost, path_length_cost)
     return total_cost, track_widths
 
 
@@ -426,7 +463,7 @@ def select_best_path(valid_paths, node_positions, cones, midpoints_to_edge):
 
 
 if __name__ == '__main__':
-    cones = cones
+    cones = cones1
 
     cones_for_triangulation = []
     for cone in cones:
@@ -435,12 +472,12 @@ if __name__ == '__main__':
     cones_for_triangulation = np.array(cones_for_triangulation)
 
     start = time.time()
-    G, midpoints, start_node, midpoint_to_edge = build_midpoint_graph(
+    G, midpoints, start_node, midpoint_to_edge, bad_triangles = build_midpoint_graph(
         cones_for_triangulation, np.array([0, 0]), 0)
 
     node_pos = nx.get_node_attributes(G, 'pos')
     valid_paths = find_all_paths_bfs(
-        G, start_node, midpoints, cones_for_triangulation)
+        G, start_node, midpoints, cones_for_triangulation, bad_triangles)
     best_path, best_cost = select_best_path(
         valid_paths, node_pos, cones_for_triangulation, midpoint_to_edge)
     print(time.time() - start)
