@@ -23,7 +23,7 @@ Each valid path is run through a cost function and the lowest cost one is picked
 PRUNING_ANGLE = 45
 PRUNING_PATH_SEG_LENGTH = 10
 PRUNING_EDGE_LENGTH = 10
-OBTUSE_THRESHOLD = 150  # degrees
+OBTUSE_THRESHOLD = 135  # degrees
 
 # Cost function weights
 ANGLE_CHANGE_WEIGHT = 4.0
@@ -38,7 +38,7 @@ TRACK_WIDTH_NORM = 3.0
 CONE_DIST_NORM = 2.0
 PATH_LENGTH_NORM = 50
 CONE_LENGTH_NORM = 2.0
-SEGMENT_LENGTH_NORM = 3.0
+SEGMENT_LENGTH_NORM = 1.5
 
 # HELPER FUNCTIONS FOR FINDING TRACKWIDTH####################
 
@@ -122,9 +122,10 @@ def build_midpoint_graph(cones, car_position=None, car_heading=None):
 
     # get all triangles
     triangles = triangulation.simplices
+    
     bad_triangles = set()
     for simplex in triangles:
-        pts = cones[simplex]
+        pts = np.array([cones[i] for i in simplex])
         if max_triangle_angle(*pts) > OBTUSE_THRESHOLD:
             bad_triangles.add(tuple(sorted(simplex)))
 
@@ -188,7 +189,7 @@ def build_midpoint_graph(cones, car_position=None, car_heading=None):
     return G, midpoints, car_node, midpoint_to_edge, bad_triangles
 
 
-def find_all_paths_bfs(G, car_node, midpoints, cones, bad_triangles):
+def find_all_paths_bfs(G, car_node, midpoints, cones, midpoint_to_edge, bad_triangles):
     '''
     G: Graph through the midpoints of delauney triangulation
     car_node: the node of the car or the starting node
@@ -379,9 +380,10 @@ def compute_path_cost(path, node_positions, cones, midpoints_to_edge, sensor_ran
             angle_change = np.degrees(np.arccos(dot_product))
             angles.append(angle_change)
 
+            
+            segment_length = np.linalg.norm(pos2 - pos1)
+            segment_lengths.append(segment_length)
             if (i != -1):
-                segment_length = np.linalg.norm(pos2 - pos1)
-                segment_lengths.append(segment_length)
                 path_length += segment_length
 
     # if there are no track widths something went terribly wrong
@@ -436,8 +438,6 @@ def compute_path_cost(path, node_positions, cones, midpoints_to_edge, sensor_ran
 
     total_cost = angle_cost + track_width_cost + \
         path_length_cost + combined_distances_cost + segment_length_cost
-    print(angle_cost, combined_distances_cost, track_width_cost,
-          segment_length_cost, path_length_cost)
     return total_cost, track_widths
 
 
@@ -463,13 +463,11 @@ def select_best_path(valid_paths, node_positions, cones, midpoints_to_edge):
 
 
 if __name__ == '__main__':
-    cones = cones1
-
+    cones = arr8
     cones_for_triangulation = []
-    for cone in cones:
-        cones_for_triangulation.append([cone[0], cone[1]])
 
-    cones_for_triangulation = np.array(cones_for_triangulation)
+    for cone in cones:
+        cones_for_triangulation.append(np.array([cone[0], cone[1]]))
 
     start = time.time()
     G, midpoints, start_node, midpoint_to_edge, bad_triangles = build_midpoint_graph(
@@ -477,7 +475,7 @@ if __name__ == '__main__':
 
     node_pos = nx.get_node_attributes(G, 'pos')
     valid_paths = find_all_paths_bfs(
-        G, start_node, midpoints, cones_for_triangulation, bad_triangles)
+        G, start_node, midpoints, cones_for_triangulation, midpoint_to_edge, bad_triangles)
     best_path, best_cost = select_best_path(
         valid_paths, node_pos, cones_for_triangulation, midpoint_to_edge)
     print(time.time() - start)
@@ -517,5 +515,3 @@ if __name__ == '__main__':
     print(compute_path_cost(best_path, node_pos,
           cones_for_triangulation, midpoint_to_edge))
 
-
-# cone in the middle of the track thing
